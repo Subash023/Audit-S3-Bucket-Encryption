@@ -1,0 +1,75 @@
+import os
+import boto3
+import logging
+from botocore.exceptions import ClientError
+
+# Set up logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+s3_client = boto3.client('s3')
+
+def lambda_handler(event, context):
+    try:
+        # 1. List all S3 buckets
+        response = s3_client.list_buckets()
+        buckets = response.get('Buckets', [])
+        
+        print("\n=== S3 BUCKET ENCRYPTION AUDIT REPORT ===")
+        print(f"{'Bucket Name':<45} | {'Encryption Type':<15} | {'KMS Key ID / Status'}")
+        print("-" * 100)
+        
+        flagged_count = 0
+        
+        # 2. Audit each bucket
+        for bucket in buckets:
+            bucket_name = bucket['Name']
+            
+            try:
+                enc_config = s3_client.get_bucket_encryption(Bucket=bucket_name)
+                rules = enc_config['ServerSideEncryptionConfiguration']['Rules']
+                
+                # Read the encryption algorithm
+                algo = rules[0]['ApplyServerSideEncryptionByDefault']['SSEAlgorithm']
+                kms_key = rules[0]['ApplyServerSideEncryptionByDefault'].get('KMSMasterKeyId', 'N/A')
+                
+                # Determine user-friendly type
+                if algo == 'AES256':
+                    enc_type = "SSE-S3"
+                    status_flag = "⚠️ [FLAGGED: NOT SSE-KMS]"
+                    flagged_count += 1
+                elif algo == 'aws:kms':
+                    enc_type = "SSE-KMS"
+                    status_flag = kms_key
+                else:
+                    enc_type = algo
+                    status_flag = "⚠️ [UNKNOWN ALGO]"
+                    flagged_count += 1
+                    
+            except ClientError as e:
+                # Handle buckets with no encryption configuration explicitly set
+                if e.response['Error']['Code'] == 'ServerSideEncryptionConfigurationNotFoundError':
+                    enc_type = "None (Default S3)"
+                    status_flag = "⚠️ [FLAGGED: NOT SSE-KMS]"
+                    flagged_count += 1
+                else:
+                    enc_type = "ERROR"
+                    status_flag = f"❌ Could not retrieve: {e.response['Error']['Message']}"
+            
+            # 3. Print report line item
+            print(f"{bucket_name:<45} | {enc_type:<15} | {status_flag}")
+            
+        print("-" * 100)
+        print(f"Audit complete. Total Flagged Buckets (Non-KMS): {flagged_count}\n")
+        
+        return {
+            'statusCode': 200,
+            'body': f"Audit completed successfully. Flagged {flagged_count} buckets."
+        }
+
+    except Exception as e:
+        logger.error(f"Global execution error: {str(e)}")
+        return {
+            'statusCode': 500,
+            'body': f"Error executing audit: {str(e)}"
+        }
